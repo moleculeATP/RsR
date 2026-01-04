@@ -1,5 +1,7 @@
 #include "graph_utils.h"
 #include "RS.h"
+#include "../3rd/SING_3D/src/distances.h"
+#include <Eigen/Dense>
 
 /**
  * @brief k nearest neighbor search
@@ -44,6 +46,7 @@ void kNN_search(int query_id, const Point& query, const Tree& kdTree,
  *
  * @return None
  */
+
 void NN_search(int query_id, const Point& query, const Tree& kdTree,
 	const Distance& tr_dist, float radius, std::vector<int>& neighbors,
 	std::vector<float>& neighbor_distance, bool isContain) {
@@ -247,21 +250,25 @@ float find_components(std::vector<Point>& vertices,
  * @param exp_genus: user-specified expected genus number
  * @param pre_max_length: [OUT] the maximum length of connection before connecting handles (conservative connection)
  * @param cross_conn_thresh: angle threshold to avoid connecting vertices on different surface
- *
+ * @param max_edge_length: [OUT] the maximum length between connected vertices
  *
  * @return None
  */
+// To Do : replace this part by SING Neighborhood graph
 void init_graph(const std::vector<Point>& vertices, const std::vector<Point>& smoothed_v,
 	const std::vector<Vector>& normals, const Tree& kdTree, const Distance& tr_dist,
 	int k, s_Graph& dist_graph, s_weightMap& weightmap, bool isEuclidean, std::vector<float>& max_length,
-	int exp_genus, std::vector<float>& pre_max_length, float cross_conn_thresh) {
+	int exp_genus, std::vector<float>& pre_max_length, float cross_conn_thresh, float& max_edge_length) {
 	dist_graph = s_Graph(vertices.size());
 	int this_k = k;
+	float cos_thresh = std::cos(cross_conn_thresh / 180. * CGAL_PI);
 	if (exp_genus != 0) {
 		this_k = 18;
 	}
+	max_edge_length = 0.f;
 
 	int i = 0;
+	int count = 0;
 	for (auto& vertex : vertices) {
 		Vector this_normal = normals[i];
 
@@ -270,28 +277,32 @@ void init_graph(const std::vector<Point>& vertices, const std::vector<Point>& sm
 		kNN_search(i, smoothed_v[i], kdTree, tr_dist, k, neighbors, dists);
 		pre_max_length[i] = dists[int(k * 2. / 3.)];
 
+
 		// Filter out cross connection
 		{
 			std::vector<int> temp;
+
 			for (int j = 0; j < neighbors.size(); j++) {
 				int idx = neighbors[j];
 				Vector neighbor_normal = normals[idx];
 				float cos_theta = this_normal * neighbor_normal /
 					std::sqrt(this_normal.squared_length()) /
 					std::sqrt(neighbor_normal.squared_length());
-				float cos_thresh = std::cos(cross_conn_thresh / 180. * CGAL_PI);
-				if (isEuclidean)
-					cos_thresh = 0.;
-				if (cos_theta >= cos_thresh) {
+				
+				if (cos_theta >= cos_thresh) { // BUG FIX : it was copy pasted wrongly from above
 					temp.push_back(idx);
+				}else{
+					count++;
 				}
 			}
-			if (temp.size() == 0)
-				std::cout << "Bad normal input" << std::endl;
-			else {
-				neighbors.clear();
-				neighbors = temp;
+
+			neighbors.clear();
+			neighbors = temp;
+
+			if(temp.empty()) {
+				std::cout << "Vertex " << i << ": no neighbors within normal threshold (cos_thresh=" << cos_thresh << ")\n";
 			}
+			
 		}
 
 		for (int j = 0; j < neighbors.size(); j++) {
@@ -321,11 +332,105 @@ void init_graph(const std::vector<Point>& vertices, const std::vector<Point>& sm
 			bool inserted;
 			boost::tie(e, inserted) = boost::add_edge(i, idx, dist_graph);
 			weightmap[e] = weight;
+			if (weight > max_edge_length)
+				max_edge_length = weight;
 		}
 		i++;
 	}
+
 	return;
 }
+
+// /**
+//  * @brief initialize the graph and related information with SING method (wrapper around SING_3D)
+//  *
+//  * @param vertices: vertices of the componnet
+//  * @param normals: normal of the component vertices
+//  * @param dist_graph: [OUT] a light-weight graph with essential connection for building MST
+//  * @param weightmap: [OUT] edge weight of dist_graph
+//  * @param max_length: [OUT] the euclidian distance of the longest connection each vertex involved
+//  * @param epsilon: parameter for SING
+//  * @param density_weight: weight for density term in SING
+//  * @param normal_weight: weight for normal term in SING
+//  * @param exp_genus: user-specified expected genus number
+//  * @param pre_max_length: [OUT] the maximum euclidian length of connection before connecting handles (conservative connection)
+//  * @param max_euclidian_distance: [OUT] the maximum euclidian distance between connected vertices
+//  * @param use_anisotropic: if to use anisotropic distance computation in S
+//  *
+//  *
+//  * @return None
+//  */
+
+void init_sing_graph(const std::vector<Point>& vertices, const std::vector<Vector>& normals,
+	s_Graph& dist_graph, s_weightMap& weightmap, std::vector<float>& max_length, float epsilon,
+	float density_weight, float normal_weight, int exp_genus, std::vector<float>& pre_max_length, 
+	float& max_euclidian_distance, bool use_anisotropic) {
+		dist_graph = s_Graph(vertices.size());
+		// convert vertices et normal to std::vector<Eigen::Vector3d>
+		std::vector<Eigen::Vector3d> e_vertices;
+		std::vector<Eigen::Vector3d> e_normals;
+		max_euclidian_distance = 0.f;
+		for (int i = 0; i < vertices.size(); i++) {
+			Eigen::Vector3d p(vertices[i].x(), vertices[i].y(), vertices[i].z());
+			Eigen::Vector3d n(normals[i].x(), normals[i].y(), normals[i].z());
+			e_vertices.push_back(p);
+			e_normals.push_back(n);
+		}
+
+		std::pair<Eigen::SparseMatrix<double>, Edge_list> dist_mat_pair;
+		if (use_anisotropic) {
+			dist_mat_pair = computeAnisotropeDistances(e_vertices, e_normals, density_weight, epsilon);
+		}
+		else {
+			dist_mat_pair = computeSINGDistances(e_vertices, e_normals, "", false, density_weight, normal_weight, epsilon);
+		}
+
+		Eigen::SparseMatrix<double> dist_mat = dist_mat_pair.first;
+		auto [edges, adj_mat] = extractSINGEdges(dist_mat, epsilon);
+
+		for (const auto& edge : edges) {
+			int i = edge.first;
+			int j = edge.second;
+			if (i == j) continue;
+			if (boost::edge(i, j, dist_graph).second)
+				continue;
+			boost::graph_traits<s_Graph>::edge_descriptor e;
+			bool inserted;
+			boost::tie(e, inserted) = boost::add_edge(i, j, dist_graph);
+			double weight = dist_mat.coeff(i, j);
+			weightmap[e] = static_cast<float>(weight);
+			double euclidian_weight = norm(vertices[i] - vertices[j]);
+			// euclidian_weightmap[e] = static_cast<float>(euclidian_weight);
+			// if (weight > max_length[i])
+			// 	max_length[i] = static_cast<float>(weight);
+			// if (weight > max_length[j])
+			// 	max_length[j] = static_cast<float>(weight);
+			if(euclidian_weight > max_length[i])
+				max_length[i] = static_cast<float>(euclidian_weight);
+			if(euclidian_weight > max_length[j])
+				max_length[j] = static_cast<float>(euclidian_weight);
+			if (euclidian_weight > max_euclidian_distance)
+				max_euclidian_distance = static_cast<float>(euclidian_weight);
+		}
+		
+		// Compute pre_max_length for each vertex (missing in original implementation)
+		for (int i = 0; i < vertices.size(); ++i) {
+			std::vector<float> neighbor_weights;
+			std::vector<float> euclidian_weights;
+			for (int j = 0; j < vertices.size(); ++j) {
+				if (dist_mat.coeff(i, j) > 0){
+					neighbor_weights.push_back(static_cast<float>(dist_mat.coeff(i, j)));
+					euclidian_weights.push_back(norm(vertices[i] - vertices[j]));
+				}
+			}
+			if (!neighbor_weights.empty()) {
+				std::sort(neighbor_weights.begin(), neighbor_weights.end());
+				int idx = std::min<int>(euclidian_weights.size() - 1, int(euclidian_weights.size() * 2. / 3.));
+				pre_max_length[i] = euclidian_weights[idx];
+			}
+		}
+	}
+
 
 /**
  * @brief Retreive the shortest path in the graph

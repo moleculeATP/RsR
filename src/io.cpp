@@ -190,6 +190,34 @@ void io_system::export_graph(m_Graph& g, fs::path out_path, std::vector<Point>& 
 	return;
 }
 
+void io_system::export_graph(s_Graph& g, fs::path out_path, std::vector<Point>& vertices, s_weightMap& weightmap) {
+	fs::ofstream file(out_path);
+	// Write vertices
+	file << "# List of geometric vertices" << std::endl;
+	for (int i = 0; i < vertices.size(); i++) {
+		Point this_coords = vertices[i];
+		file << "v " << std::to_string(this_coords.x())
+			<< " " << std::to_string(this_coords.y())
+			<< " " << std::to_string(this_coords.z()) << std::endl;
+	}
+
+	// Write lines with weights as comments
+	file << std::endl;
+	file << "# Line elements with weights" << std::endl;
+	s_Graph::edge_iterator ei, ei_end;
+	for (boost::tie(ei, ei_end) = boost::edges(g); ei != ei_end; ei++) {
+		int source_id = boost::source(*ei, g);
+		int target_id = boost::target(*ei, g);
+		float weight = weightmap[*ei];
+		file << "l " << std::to_string(source_id + 1)
+			<< " " << std::to_string(target_id + 1) 
+			<< " # weight: " << std::to_string(weight) << std::endl;
+	}
+	file.close();
+	return;
+}
+
+
 void io_system::export_edges(m_Graph& g, std::vector<Vertex>& roots, fs::path out_path) {
 	fs::ofstream file(out_path);
 	// Write vertices

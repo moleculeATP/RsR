@@ -1,0 +1,3 @@
+[submodule "3rd/SING_3D"]
+	path = 3rd/SING_3D
+	url = git@github.com:moleculeATP/SING_3D.git

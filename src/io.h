@@ -25,6 +25,7 @@ public:
 	void export_obj(std::vector<Point>&, std::vector<Vector>&, fs::path);
 	void export_graph(m_Graph&, fs::path);
 	void export_graph(m_Graph& g, fs::path out_path, std::vector<Point>& vertices);
+	void export_graph(s_Graph& g, fs::path out_path, std::vector<Point>& vertices, s_weightMap& weightmap);
 	void export_edges(m_Graph& g, std::vector<Vertex>& roots, fs::path out_path);
 	void export_betti(std::vector<int>&, fs::path out_path);
 	void read_pc_ply(fs::path, std::vector<Point>&,

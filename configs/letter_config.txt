@@ -1,9 +1,9 @@
 root ./example
-model_name letter_G.obj
+model_name letter_A.obj
 out_root ./output
-out_name letter_G
+out_name letter_A
 isEuclidean true
-isGTNormal true
-k 30
+isGTNormal false
+k 60
 n 40
-isDebug false
+isDebug true

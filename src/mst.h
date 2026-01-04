@@ -8,8 +8,14 @@
 #include "normal.h"
 #include "io.h"
 
+
 #ifndef MST_H
 #define MST_H
+
+// DIRTY CONTAINER for test result debugging
+extern int test_result_polyscope;
+extern Point middle_point_geometry_test;
+extern Vector normal_geometry_test;
 
 typedef std::pair<Vertex, Vertex> m_Edge;
 typedef std::pair<float, int> m_Edge_length;
@@ -28,11 +34,11 @@ void build_mst(m_Graph&, std::vector<Vertex>&,
 	bool, const std::vector<Point>&,
 	std::vector<Vector>&);
 
-bool geometry_check(m_Graph& mst, m_Edge& candidate, Tree& kdTree, Distance& tr_dist);
+bool geometry_check(m_Graph& mst, m_Edge& candidate, Tree& kdTree, Distance& tr_dist, float max_edge_length);
 
-bool Vanilla_check(m_Graph& g, m_Edge& candidate, Tree& kdTree, Distance& tr_dist);
+bool Vanilla_check(m_Graph& g, m_Edge& candidate, Tree& kdTree, Distance& tr_dist, float max_edge_length);
 
-void connect_handle(const std::vector<Point>&, Tree&, Distance&,
+void connect_handle(const std::vector<Point>&, Tree&, Distance&, float,
 	m_Graph&, std::vector<Vertex>& connected_handle_root, std::vector<int>& betti,
 	int k = 8, bool isEuclidean = false, int step_thresh = 10);
 

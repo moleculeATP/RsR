@@ -1,0 +1,9 @@
+root ./example
+model_name big_tree.obj
+out_root ./output
+out_name big_tree
+isEuclidean false
+isGTNormal false
+k 50
+theta 50
+isDebug true

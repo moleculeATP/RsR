@@ -1,0 +1,12 @@
+root ./example
+model_name light_CP_2000.obj
+ground_truth_name light.obj
+out_root ./output
+out_name light_tree
+isEuclidean true
+isGTNormal false
+k 20
+n 5
+r 50
+theta 100
+isDebug true

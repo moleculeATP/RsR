@@ -40,11 +40,14 @@ public:
 		isGTNormal = false;
 		isDebug = false;
 		isFaceLoop = true;
+		useSING = false; // Default to false
 		k = 30;
 		r = 20.;
 		n = 50;
 		theta = 60.;
 		exp_genus = -1;
+		sing_epsilon = 1.2;
+		sing_p = 3.0;
 		set_mode();
 	}
 
@@ -56,11 +59,14 @@ public:
 		isGTNormal = false;
 		isFaceLoop = true;
 		isDebug = false;
+		useSING = false; // Default to false
 		k = 30;
 		r = 20.;
 		n = 50;
 		theta = 60.;
 		exp_genus = -1;
+		sing_epsilon = 1.2;
+		sing_p = 3.0;
 		config_path = in_config_path;
 		read_config(config_path);
 		set_mode();
@@ -95,12 +101,16 @@ private:
 	bool isGTNormal;
 	bool isDebug;
 	bool isFaceLoop;
+	bool useSING; 
 	int k;
 	float r;
 	float theta;
 	int n;
 	int exp_genus;
+	float sing_epsilon; // SING epsilon parameter
+	float sing_p;       // SING p parameter
 	fs::path model_path;
+	fs::path ground_truth_path;
 	fs::path root_path;
 	string model_name;
 	fs::path out_root_path;

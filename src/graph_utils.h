@@ -17,6 +17,7 @@
 #include <queue>
 #include "math_util.h"
 #include "etf.h"
+#include "../3rd/SING_3D/src/distances.h"
 
 #ifndef GRAPH_FUNC_H
 #define GRAPH_FUNC_H
@@ -209,7 +210,12 @@ float find_components(std::vector<Point>&,
 void init_graph(const std::vector<Point>& vertices, const std::vector<Point>& smoothed_v,
                 const std::vector<Vector>& normals, const Tree& kdTree, const Distance& tr_dist,
                 int k, s_Graph& dist_graph, s_weightMap& weightmap, bool isEuclidean, std::vector<float>& max_length,
-				int exp_genus, std::vector<float>& pre_max_length, float cross_conn_thresh);
+				int exp_genus, std::vector<float>& pre_max_length, float cross_conn_thresh, float& max_edge_length);
+
+void init_sing_graph(const std::vector<Point>& vertices, const std::vector<Vector>& normals,
+	s_Graph& dist_graph, s_weightMap& weightmap, std::vector<float>& max_length, float epsilon,
+	float density_weight, float normal_weight, int exp_genus, std::vector<float>& pre_max_length, 
+	float& max_euclidian_distance, bool use_anisotropic = false);
 
 void print_path(std::vector<Vertex>&, Vertex, std::vector<Vertex>&);
 

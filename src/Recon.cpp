@@ -1,6 +1,20 @@
 #include "Recon.h"
 #include <boost/filesystem.hpp>
 
+#include "polyscope/polyscope.h"
+#include "polyscope/messages.h"
+#include "polyscope/surface_mesh.h"
+#include "polyscope/point_cloud.h"
+#include "polyscope/curve_network.h"
+
+polyscope::PointCloud* ps_cloud_for_polyscope = nullptr;
+polyscope::CurveNetwork* init_graph_for_polyscope = nullptr;
+polyscope::CurveNetwork* edges_passed = nullptr;
+std::vector<int> test_results;
+std::vector<int> order_inserted;
+
+bool SING = true;
+
 /**
  * @brief Read the input config file and initialize
  *
@@ -45,6 +59,12 @@ void Reconstructor::read_config(fs::path config_path) {
                 model_path = root_path / tokens[1];
             }
         }
+        if(instruct == "ground_truth_name") {
+            fs::path gt_name = tokens[1];
+            ground_truth_path = root_path / gt_name;
+
+        }
+
         if (instruct == "out_root") {
             out_root_path = fs::path(tokens[1]);
         }
@@ -256,7 +276,9 @@ void Reconstructor::reconstruct_single(std::string noise_type, float sigma, floa
         if(false){
             float angle = 25. / 180. * CGAL_PI;
             add_normal_noise(angle, in_normals);
-        }
+        }        
+
+
     }
     recon_timer.end("Estimate normals");
     recon_timer.end("Initialization");
@@ -342,6 +364,9 @@ void Reconstructor::reconstruct_single(std::string noise_type, float sigma, floa
         in_vertices.clear();
         in_normals.clear();
         in_smoothed_v.clear();
+
+
+        
     }
 
     for (int component_id = 0; component_id < component_vertices.size(); component_id++) {
@@ -352,6 +377,37 @@ void Reconstructor::reconstruct_single(std::string noise_type, float sigma, floa
         std::vector<Point> vertices = component_vertices[component_id];
         std::vector<Vector> normals = component_normals[component_id];
         std::vector<Point> smoothed_v = component_smoothed_v[component_id];
+
+
+        
+        // ====== POLYSCOPE VISUALIZATION ======
+        {
+        std::vector<std::array<double, 3>> ps_normals;
+        ps_normals.reserve(normals.size());
+        for (const auto& n : normals) {
+            ps_normals.push_back({ n.x(), n.y(), n.z() });
+        }
+
+        std::vector<std::array<double, 3>> ps_vertices;
+        ps_vertices.reserve(smoothed_v.size());
+        for (const auto& p : smoothed_v) {
+            ps_vertices.push_back({ p.x(), p.y(), p.z() });
+        }
+
+        ps_cloud_for_polyscope = polyscope::registerPointCloud("input point cloud", ps_vertices);
+        ps_cloud_for_polyscope->setPointRadius(0.002, true);
+        auto* q_normals = ps_cloud_for_polyscope->addVectorQuantity("normals", ps_normals, polyscope::VectorType::STANDARD);
+
+        q_normals->setVectorLengthScale(0.004, true);
+        q_normals->setVectorRadius(0.0005, true);
+        }
+        
+        // ======================================
+
+
+
+
+
         std::string out_component_name = out_name +
             "_component_" + std::to_string(component_id);
 
@@ -375,13 +431,249 @@ void Reconstructor::reconstruct_single(std::string noise_type, float sigma, floa
         std::vector<float> pre_max_length(vertices.size(), 0.);
         mst.isEuclidean = isEuclidean;
         mst.exp_genus = exp_genus;
+        float max_euclidian_distance = 0.;
         {
+
+        // ANISOTROPE SING GRAPH PART
+        s_Graph g_sing;
+        s_weightMap weightmap_sing = boost::get(boost::edge_weight, g_sing);
+        // s_weightMap euclidian_weightmap_sing = boost::get(boost::edge_weight, g_sing);
+        m_Graph sing_mst;
+        float max_euclidian_distance_sing;
+        std::vector<float> connection_max_length_sing(vertices.size(), 0.); // useless but testing
+        std::vector<float> pre_max_length_sing(vertices.size(), 0.);
+
+        init_sing_graph(smoothed_v, normals,
+            g_sing, weightmap_sing, connection_max_length_sing, 
+            25, .75, 0, exp_genus, pre_max_length_sing, max_euclidian_distance_sing, true);
+        // 25 for 2000 regular
+        std::cout << "Max euclidian distance in SING graph: " << max_euclidian_distance_sing << std::endl;
+
+        // ====== POLYSCOPE VISUALIZATION : INIT SING GRAPH ======
+        {
+        std::vector<std::array<double,3>> ps_vertices;
+        ps_vertices.reserve(smoothed_v.size());
+        std::cout << smoothed_v.size() << std::endl;
+        for (const auto& p : smoothed_v) {
+            ps_vertices.push_back({p.x(), p.y(), p.z()});
+        }
+
+        // Convert FULL_EDGES -> polyscope edges
+        std::vector<std::array<size_t,2>> ps_edges;
+        ps_edges.reserve(full_edges.size());
+
+        for (const auto& e : g_sing.m_edges) {
+            ps_edges.push_back({
+                static_cast<size_t>(e.m_source),
+                static_cast<size_t>(e.m_target)
+            });
+        }
+
+        // Register curve network
+        auto* sing_graph_ =
+            polyscope::registerCurveNetwork("Sing graph", ps_vertices, ps_edges);
+
+        // Appearance
+        sing_graph_->setRadius(0.0002, true);
+        sing_graph_->setColor({0., 0., 0.});
+        sing_graph_->setEnabled(false);
+        }
+            
+        // ====== END POLYSCOPE VISUALIZATION ======
+
+        // build a mst from sing edges with weightmap_sing distances
+        {
+            std::vector<boost::graph_traits< s_Graph >::vertex_descriptor> p_sing(boost::num_vertices(g_sing));
+
+            boost::property_map< s_Graph, boost::vertex_distance_t >::type distance_sing
+                = boost::get(boost::vertex_distance, g_sing);
+            boost::property_map< s_Graph, boost::vertex_index_t >::type indexmap_sing
+                = boost::get(boost::vertex_index, g_sing);
+
+            boost::prim_minimum_spanning_tree
+            (g_sing, *boost::vertices(g_sing).first, &p_sing[0],
+                distance_sing, weightmap_sing, indexmap_sing,
+                boost::default_dijkstra_visitor());
+
+            sing_mst.graph = Graph(vertices.size());
+            sing_mst.isEuclidean = isEuclidean;
+            sing_mst.exp_genus = exp_genus;
+            build_mst(sing_mst, p_sing, isEuclidean, smoothed_v, normals);
+
+        // ====== POLYSCOPE VISUALIZATION : sing_MST
+            {
+            // Convert points -> polyscope vertices
+            std::vector<std::array<double,3>> ps_vertices;
+            ps_vertices.reserve(smoothed_v.size());
+            for (const auto& p : smoothed_v) {
+                ps_vertices.push_back({p.x(), p.y(), p.z()});
+            }
+
+            // Convert FULL_EDGES -> polyscope edges
+            std::vector<std::array<size_t,2>> ps_edges;
+            ps_edges.reserve(boost::num_edges(sing_mst.graph));
+
+            boost::graph_traits<Graph>::edge_iterator ei, ei_end;
+            for (boost::tie(ei, ei_end) = boost::edges(sing_mst.graph); ei != ei_end; ++ei) {
+                auto e = *ei;
+                size_t u = boost::source(e, sing_mst.graph);
+                size_t v = boost::target(e, sing_mst.graph);
+                ps_edges.push_back({u, v});
+            }
+
+            // Register curve network
+            auto* sing_mst_ =
+                polyscope::registerCurveNetwork("Sing MST", ps_vertices, ps_edges);
+
+            // Appearance
+            sing_mst_->setRadius(0.001, true);
+            sing_mst_->setColor({1., 0., 0.});
+            sing_mst_->setEnabled(false);
+            }
+            // ======================================
+            }
+
+            // REGULAR SING GRAPH PART
+            s_Graph g_sing_2;
+            s_weightMap weightmap_sing_2 = boost::get(boost::edge_weight, g_sing);
+            // s_weightMap euclidian_weightmap_sing_2 = boost::get(boost::edge_weight, g_sing_2);
+            m_Graph sing_mst_2;
+            float max_euclidian_distance_sing_2;
+            std::vector<float> connection_max_length_sing_2(vertices.size(), 0.); // useless but testing
+            std::vector<float> pre_max_length_sing_2(vertices.size(), 0.);
+            
+            init_sing_graph(smoothed_v, normals,
+            g_sing_2, weightmap_sing_2, connection_max_length_sing_2,
+            2, 1., 0, exp_genus, pre_max_length_sing_2, max_euclidian_distance_sing_2 , false);
+
+            // ====== POLYSCOPE VISUALIZATION : INIT SING GRAPH ======
+            {
+            std::vector<std::array<double,3>> ps_vertices;
+            ps_vertices.reserve(smoothed_v.size());
+            std::cout << smoothed_v.size() << std::endl;
+            for (const auto& p : smoothed_v) {
+                ps_vertices.push_back({p.x(), p.y(), p.z()});
+            }
+
+            // Convert FULL_EDGES -> polyscope edges
+            std::vector<std::array<size_t,2>> ps_edges;
+            ps_edges.reserve(full_edges.size());
+
+            for (const auto& e : g_sing_2.m_edges) {
+                ps_edges.push_back({
+                    static_cast<size_t>(e.m_source),
+                    static_cast<size_t>(e.m_target)
+                });
+            }
+
+            // Register curve network
+            auto* sing_mst_2 =
+                polyscope::registerCurveNetwork("Sing graph 2", ps_vertices, ps_edges);
+
+            // Appearance
+            sing_mst_2->setRadius(0.0002, true);
+            sing_mst_2->setColor({0., 0., 0.});
+            sing_mst_2->setEnabled(false);
+            }
+                
+            // ====== END POLYSCOPE VISUALIZATION ======
+
+            // build a mst from sing edges with weightmap_sing distances
+            {
+                std::vector<boost::graph_traits< s_Graph >::vertex_descriptor> p_sing(boost::num_vertices(g_sing_2));
+
+                boost::property_map< s_Graph, boost::vertex_distance_t >::type distance_sing
+                    = boost::get(boost::vertex_distance, g_sing_2);
+                boost::property_map< s_Graph, boost::vertex_index_t >::type indexmap_sing
+                    = boost::get(boost::vertex_index, g_sing_2);
+
+                boost::prim_minimum_spanning_tree
+                (g_sing_2, *boost::vertices(g_sing_2).first, &p_sing[0],
+                    distance_sing, weightmap_sing_2, indexmap_sing,
+                    boost::default_dijkstra_visitor());
+
+                sing_mst_2.graph = Graph(vertices.size());
+                sing_mst_2.isEuclidean = isEuclidean;
+                sing_mst_2.exp_genus = exp_genus;
+                build_mst(sing_mst_2, p_sing, isEuclidean, smoothed_v, normals);
+
+            // ====== POLYSCOPE VISUALIZATION : sing_MST
+                {
+                // Convert points -> polyscope vertices
+                std::vector<std::array<double,3>> ps_vertices;
+                ps_vertices.reserve(smoothed_v.size());
+                for (const auto& p : smoothed_v) {
+                    ps_vertices.push_back({p.x(), p.y(), p.z()});
+                }
+
+                // Convert FULL_EDGES -> polyscope edges
+                std::vector<std::array<size_t,2>> ps_edges;
+                ps_edges.reserve(boost::num_edges(sing_mst_2.graph));
+
+                boost::graph_traits<Graph>::edge_iterator ei, ei_end;
+                for (boost::tie(ei, ei_end) = boost::edges(sing_mst_2.graph); ei != ei_end; ++ei) {
+                    auto e = *ei;
+                    size_t u = boost::source(e, sing_mst_2.graph);
+                    size_t v = boost::target(e, sing_mst_2.graph);
+                    ps_edges.push_back({u, v});
+                }
+
+                // Register curve network
+                auto* mst_2_net =
+                    polyscope::registerCurveNetwork("Sing MST 2", ps_vertices, ps_edges);
+
+                // Appearance
+                mst_2_net->setRadius(0.001, true);
+                mst_2_net->setColor({0., 1., 0.});
+                mst_2_net->setEnabled(false);
+                }
+                // ======================================
+            }
+
+            // REGULAR GRAPH PART
             s_Graph g;
             s_weightMap weightmap = boost::get(boost::edge_weight, g);
             init_graph(smoothed_v, smoothed_v, normals,
                 kdTree, tr_dist, k,
                 g, weightmap, isEuclidean, connection_max_length,
-                exp_genus, pre_max_length, theta);
+                exp_genus, pre_max_length, theta, max_euclidian_distance);
+
+            // ====== POLYSCOPE VISUALIZATION : INIT GRAPH ======
+            {
+            std::vector<std::array<double,3>> ps_vertices;
+            std::vector<std::array<size_t,2>> ps_edges;
+            ps_vertices.reserve(smoothed_v.size());
+            std::cout << smoothed_v.size() << std::endl;
+            for (const auto& p : smoothed_v) {
+                ps_vertices.push_back({p.x(), p.y(), p.z()});
+            }
+            
+            for (const auto& e : g.m_edges) {
+                ps_edges.push_back({
+                    static_cast<size_t>(e.m_source),
+                    static_cast<size_t>(e.m_target)
+                });
+            }
+
+            // Register curve network
+            auto* init_graph_ =
+                polyscope::registerCurveNetwork("Init graph base", ps_vertices, ps_edges);
+            // Appearance
+            init_graph_->setRadius(0.0002, true);
+            init_graph_->setColor({0., 0., 0.});
+            init_graph_->setEnabled(false);
+            }
+            // ======================================
+
+
+
+            // init_sing_graph(smoothed_v, normals,
+            //     g, weightmap, connection_max_length,
+            //     100, 1.5, 0, exp_genus, pre_max_length);
+
+             if(isDebug)
+                IO.export_graph(g, out_root_path / (out_component_name + "_init_graph.obj"), smoothed_v, weightmap);
+
 
             // Generate MST
             std::vector<boost::graph_traits< s_Graph >::vertex_descriptor> p(boost::num_vertices(g));
@@ -398,22 +690,90 @@ void Reconstructor::reconstruct_single(std::string noise_type, float sigma, floa
 
             build_mst(mst, p, isEuclidean, smoothed_v, normals);
 
-            // Edge arrays and sort
+        // ====== POLYSCOPE VISUALIZATION : MST ======
+
+            std::vector<std::array<double,3>> mst_vertices;
+            mst_vertices.reserve(smoothed_v.size());
+            for (const auto& p : smoothed_v) {
+                mst_vertices.push_back({p.x(), p.y(), p.z()});
+            }
+
+            std::vector<std::array<size_t,2>> mst_edges;
+            mst_edges.reserve(boost::num_edges(mst.graph));
+
+            boost::graph_traits<Graph>::edge_iterator ei, ei_end;
+            for (boost::tie(ei, ei_end) = boost::edges(mst.graph); ei != ei_end; ++ei) {
+                auto e = *ei;
+                size_t u = boost::source(e, mst.graph);
+                size_t v = boost::target(e, mst.graph);
+                mst_edges.push_back({u, v});
+            }
+
+            auto* mst_net = polyscope::registerCurveNetwork("MST", mst_vertices, mst_edges);
+
+            // Appearance settings
+            mst_net->setRadius(0.001, true);
+            mst_net->setColor({0., 0., 1.});
+            mst_net->setEnabled(false); 
+
+        // Store original euclidean parameters for geometry validation
+        s_weightMap euclidian_dist_weightmap = weightmap;
+        float euclidean_max_distance = max_euclidian_distance;
+        std::vector<float> euclidean_pre_max_length = pre_max_length;
+        
+        if (SING){
+            g = g_sing;
+            mst = sing_mst;
+            weightmap = weightmap_sing;  // Use SING distances for edge priority
+            pre_max_length = pre_max_length_sing;  // Use SING pre_max_length for SING edge filtering
+            // Use SING's actual maximum Euclidean distance for geometry validation
+            euclidean_max_distance = max_euclidian_distance_sing;
+            std::cout << "SING mode: using max_euclidean=" << euclidean_max_distance 
+                      << " (from SING graph)" << std::endl;
+        } else {
+            std::cout << "Regular mode: using max_euclidean=" << euclidean_max_distance 
+                      << " (from k-NN graph)" << std::endl;
+        }
+
+        // Edge arrays and sort 
             if (true) {
                 int idx = 0;
                 s_Graph::edge_iterator ei, ei_end;
                 for (boost::tie(ei, ei_end) = boost::edges(g); ei != ei_end; ei++) {
-                    if (weightmap[*ei]>pre_max_length[(*ei).m_source]||
-                        weightmap[*ei] > pre_max_length[(*ei).m_target])
-                        continue;
-                    edge_length.push_back(m_Edge_length
-                    (weightmap[*ei], full_edges.size()));
-                    full_edges.push_back(m_Edge((*ei).m_source, (*ei).m_target));
-                    idx++;
+                    // Apply appropriate distance filtering based on mode
+                    bool should_include = true;
+                    if (SING) {
+                        // For SING edges: filter by actual Euclidean distances to prevent spatially invalid edges
+                        Point p1 = smoothed_v[(*ei).m_source];
+                        Point p2 = smoothed_v[(*ei).m_target];
+                        float euclidean_length = std::sqrt((p1 - p2).squared_length());
+                        // Use conservative Euclidean filtering based on regular graph's pre_max_length
+                        if (euclidean_length > euclidean_pre_max_length[(*ei).m_source] ||
+                            euclidean_length > euclidean_pre_max_length[(*ei).m_target]) {
+                            should_include = false;
+                        }
+                    } else {
+                        // For regular edges: use original filtering
+                        if (weightmap[*ei] > pre_max_length[(*ei).m_source] ||
+                            weightmap[*ei] > pre_max_length[(*ei).m_target]) {
+                            should_include = false;
+                        }
+                    }
+                    
+                    if (should_include) {
+                        edge_length.push_back(m_Edge_length(weightmap[*ei], full_edges.size()));
+                        full_edges.push_back(m_Edge((*ei).m_source, (*ei).m_target));
+                        idx++;
+                    }
                 }
                 std::sort(edge_length.begin(), edge_length.end(), edge_comparator);
+                
+                // Use the appropriate max distance for geometry test
+                max_euclidian_distance = euclidean_max_distance;
             }
         }
+
+        
         recon_timer.end("Build MST");
 
         // Export MST
@@ -421,6 +781,52 @@ void Reconstructor::reconstruct_single(std::string noise_type, float sigma, floa
             fs::path out_path = out_root_path / ("MST_" + out_component_name + "_C.obj");
             IO.export_graph(mst, out_path);
         }
+
+        // ====== POLYSCOPE VISUALIZATION : INIT GRAPH ======
+            {
+            // Convert points -> polyscope vertices
+            std::vector<std::array<double,3>> ps_vertices;
+            ps_vertices.reserve(smoothed_v.size());
+            for (const auto& p : smoothed_v) {
+                ps_vertices.push_back({p.x(), p.y(), p.z()});
+            }
+
+            // Convert FULL_EDGES -> polyscope edges
+            std::vector<std::array<size_t,2>> ps_edges;
+            ps_edges.reserve(full_edges.size());
+
+            for (const auto& e : full_edges) {
+                ps_edges.push_back({
+                    static_cast<size_t>(e.first),
+                    static_cast<size_t>(e.second)
+                });
+            }
+
+            // Register curve network
+            init_graph_for_polyscope =
+                polyscope::registerCurveNetwork("Init graph used", ps_vertices, ps_edges);
+
+            // Appearance
+            init_graph_for_polyscope->setRadius(0.0002, true);
+            init_graph_for_polyscope->setColor({0., 0., 0.});
+            init_graph_for_polyscope->setEnabled(false);
+            }
+            // ======================================
+
+
+        
+
+
+
+
+
+
+        
+
+
+
+
+
 
         // Initialize face loop label
         mst.etf.reserve(6 * vertices.size() - 11);
@@ -435,6 +841,14 @@ void Reconstructor::reconstruct_single(std::string noise_type, float sigma, floa
         //int inserted_edge = 0;
         if (true)
         {
+            std::vector<Point> geometry_test_middle_points;
+            std::vector<Vector> geometry_test_normals;
+
+            // Custom vector for rememnering which test failed
+            test_results.resize(edge_length.size(), -1);
+             // -1: not tested, 0: passed, 1: topology failed, 2: geometry failed
+
+
             // Edge connection
             for (int i = 0; i < edge_length.size(); i++) {
                 if (i % 100000 == 0) {
@@ -444,10 +858,20 @@ void Reconstructor::reconstruct_single(std::string noise_type, float sigma, floa
                 unsigned int edge_idx = edge_length[i].second;
                 m_Edge this_edge = full_edges[edge_idx];
 
-                if (boost::edge(this_edge.first, this_edge.second, mst.graph).second)
-                    continue;
-                bool isValid = Vanilla_check(mst, this_edge, kdTree, tr_dist);
+                if (boost::edge(this_edge.first, this_edge.second, mst.graph).second){
+                    continue; // already connected in MST
+                }
 
+                test_result_polyscope = -1;
+                middle_point_geometry_test = Point(0., 0., 0.);
+                normal_geometry_test = Vector(0., 0., 0.);
+                bool isValid = Vanilla_check(mst, this_edge, kdTree, tr_dist, max_euclidian_distance);
+                test_results[edge_idx] = test_result_polyscope;
+
+                geometry_test_middle_points.push_back(middle_point_geometry_test);
+                geometry_test_normals.push_back(normal_geometry_test);
+
+                
                 if (isValid) {
                     bool isAdded = register_face(mst, this_edge.first, this_edge.second, faces, kdTree, tr_dist, edge_length[i].first);
                     if(isAdded)
@@ -464,7 +888,7 @@ void Reconstructor::reconstruct_single(std::string noise_type, float sigma, floa
             }
             showProgressBar(1.0);
             std::cout << std::endl;
-            //std::cout << inserted_edge << std::endl;
+            // std::cout << inserted_edge << std::endl;
 
             // Output
             if (exp_genus != 0 && isDebug) {
@@ -473,12 +897,136 @@ void Reconstructor::reconstruct_single(std::string noise_type, float sigma, floa
                 out_path = out_root_path / ("Graph_beforehandle_" + out_component_name + ".obj");
                 IO.export_graph(mst, out_path);
             }
+
+            std::cout << "Betti 1 before handles: " << bettiNum_1 << std::endl;
+            // ====== POLYSCOPE VISUALIZATION : Mesh before handles ======
+            {
+            // Convert vertices
+            std::vector<std::array<double,3>> ps_vertices;
+            ps_vertices.reserve(vertices.size());
+            for (const auto& p : vertices) {
+                ps_vertices.push_back({p.x(), p.y(), p.z()});
+            }
+
+            // Convert faces
+            std::vector<std::array<size_t,3>> ps_faces;
+            ps_faces.reserve(faces.size());
+            for (const auto& f : faces) {
+                ps_faces.push_back({static_cast<size_t>(f.ids[0]),
+                                    static_cast<size_t>(f.ids[1]),
+                                    static_cast<size_t>(f.ids[2])});
+            }
+
+            // Register the mesh in Polyscope
+            auto* mesh = polyscope::registerSurfaceMesh("Graph Mesh before handles", ps_vertices, ps_faces);
+
+            // Optional appearance
+            mesh->setSurfaceColor({0.8, 0.8, 0.8});
+            mesh->setEdgeWidth(0.001);
+            mesh->setEnabled(false);  
+            }
+            // ======================================
+
+            // ===== POLYSCOPE VISUALIZATION : Edge results =====
+            {
+                // Convert points -> polyscope vertices
+                std::vector<std::array<double, 3>> ps_vertices;
+                ps_vertices.reserve(smoothed_v.size());
+                for (const auto& p : smoothed_v) {
+                    ps_vertices.push_back({ p.x(), p.y(), p.z() });
+                }
+
+                // Convert FULL_EDGES -> polyscope edges with different colors according to test_results
+                std::vector<std::array<size_t, 2>> ps_edges_passed;
+                std::vector<std::array<size_t, 2>> ps_edges_topology_failed;
+                std::vector<std::array<size_t, 2>> ps_edges_geometry_failed;
+                std::vector<std::array<double, 3>> ps_middle_points;
+                order_inserted.clear();
+                int num_passed = 0;
+
+                for (int i = 0; i < full_edges.size(); i++) {
+                    const auto& e = full_edges[i];
+                    if (test_results[i] <= 0) {
+                        ps_edges_passed.push_back({
+                            static_cast<size_t>(e.first),
+                            static_cast<size_t>(e.second)
+                            });
+                        if (test_results[i] == 0){
+                            order_inserted.push_back(num_passed);
+                            num_passed++;
+                        }
+                        else {
+                            order_inserted.push_back(-1); // mst edge
+                        }
+                    }
+                    else if (test_results[i] == 1) {
+                        ps_edges_topology_failed.push_back({
+                            static_cast<size_t>(e.first),
+                            static_cast<size_t>(e.second)
+                            });
+                    }
+                    else if (test_results[i] == 2) {
+                        ps_edges_geometry_failed.push_back({
+                            static_cast<size_t>(e.first),
+                            static_cast<size_t>(e.second)
+                            });
+                    }
+                }
+
+                // Register curve networks
+                edges_passed =
+                    polyscope::registerCurveNetwork("Edges Passed Before Handles", ps_vertices, ps_edges_passed);
+                auto* edges_topology_failed =
+                    polyscope::registerCurveNetwork("Edges Topology Failed Before Handles", ps_vertices, ps_edges_topology_failed);
+                auto* edges_geometry_failed =
+                    polyscope::registerCurveNetwork("Edges Geometry Failed Before Handles", ps_vertices, ps_edges_geometry_failed);
+
+                // Appearance
+                edges_passed->setRadius(0.0005, true);
+                edges_passed->setColor({ 0., 1., 0. });
+                edges_passed->setEnabled(false);
+
+                edges_topology_failed->setRadius(0.0005, true);
+                edges_topology_failed->setColor({ 1., 0., 0. });
+                edges_topology_failed->setEnabled(false);
+
+                edges_geometry_failed->setRadius(0.0005, true);
+                edges_geometry_failed->setColor({ 0., 0., 1. });
+                edges_geometry_failed->setEnabled(false);
+
+            }
+            // ======================================      
+            
+            // ===== POLYSCOPE VISUALIZATION : Geometry test points ======
+            {
+                std::vector<std::array<double, 3>> ps_test_points;
+                ps_test_points.reserve(geometry_test_middle_points.size());
+                for (const auto& p : geometry_test_middle_points) {
+                    ps_test_points.push_back({ p.x(), p.y(), p.z() });
+                }
+
+                auto* test_points_cloud = polyscope::registerPointCloud("Geometry Test Points", ps_test_points);
+                test_points_cloud->setPointRadius(0.0006, true);
+
+                std::vector<std::array<double, 3>> ps_test_normals;
+                ps_test_normals.reserve(geometry_test_normals.size());
+                for (const auto& n : geometry_test_normals) {
+                    ps_test_normals.push_back({ n.x(), n.y(), n.z() });
+                }
+
+                auto* q_test_normals = test_points_cloud->addVectorQuantity("Geometry Test Normals", ps_test_normals, polyscope::VectorType::STANDARD);
+                q_test_normals->setVectorLengthScale(0.002, true);
+                q_test_normals->setVectorRadius(0.0005, true);
+                test_points_cloud->setEnabled(false);
+            }
+            // ======================================
+
         }
         // Create handles & Triangulation
         if (exp_genus != 0) {
             mst.isFinalize = true;
             std::vector<Vertex> connected_handle_root;
-            connect_handle(smoothed_v, kdTree, tr_dist, mst, connected_handle_root, betti_1, k, isEuclidean, n);
+            connect_handle(smoothed_v, kdTree, tr_dist, max_euclidian_distance, mst, connected_handle_root, betti_1, k, isEuclidean, n);
             if (isDebug) {
                 fs::path out_path = out_root_path / ("handle_" + out_component_name + ".obj");
                 IO.export_edges(mst, connected_handle_root, out_path);
@@ -498,8 +1046,81 @@ void Reconstructor::reconstruct_single(std::string noise_type, float sigma, floa
         if (isDebug) {
             out_path = out_root_path / ("Graph_" + out_component_name + ".obj");
             IO.export_graph(mst, out_path, vertices);
+            std::cout << "Final Betti 1: " << bettiNum_1 << std::endl;
         }
+
+        // ====== POLYSCOPE VISUALIZATION : Mesh after handles ======
+
+            // Convert vertices
+            std::vector<std::array<double,3>> ps_vertices;
+            ps_vertices.reserve(vertices.size());
+            for (const auto& p : vertices) {
+                ps_vertices.push_back({p.x(), p.y(), p.z()});
+            }
+
+            // Convert faces
+            std::vector<std::array<size_t,3>> ps_faces;
+            ps_faces.reserve(faces.size());
+            for (const auto& f : faces) {
+                ps_faces.push_back({static_cast<size_t>(f.ids[0]),
+                                    static_cast<size_t>(f.ids[1]),
+                                    static_cast<size_t>(f.ids[2])});
+            }
+
+            // Register the mesh in Polyscope
+            auto* mesh = polyscope::registerSurfaceMesh("Graph Mesh after handles", ps_vertices, ps_faces);
+
+            // Optional appearance
+            mesh->setSurfaceColor({0.6, 0.8, 0.8});
+            mesh->setEdgeWidth(0.001);
+            mesh->setEnabled(false);  
+
+            // ======================================
+        
     }
+
+    // ===== POLYSCOPE VISUALIZATION : ground truth
+    fs::path gt_path = ground_truth_path;
+    if (fs::exists(gt_path)) {
+        io_system IO;
+        std::vector<Point> gt_vertices;
+        std::vector<Vector> gt_normals;
+        std::vector<Face> gt_faces;
+        std::string file_end = gt_path.extension().string();
+        if (file_end == ".obj") {
+            IO.read_obj(gt_path, gt_vertices, gt_normals, gt_faces);
+        }
+        else if (file_end == ".ply") {
+            IO.read_pc_ply(gt_path, gt_vertices, gt_normals, gt_vertices);
+        }
+
+        // Convert vertices
+        std::vector<std::array<double, 3>> ps_vertices;
+        ps_vertices.reserve(gt_vertices.size());
+        for (const auto& p : gt_vertices) {
+            ps_vertices.push_back({ p.x(), p.y(), p.z() });
+        }
+
+        // Convert faces
+        std::vector<std::array<size_t, 3>> ps_faces;
+        ps_faces.reserve(gt_faces.size());
+        for (const auto& f : gt_faces) {
+            ps_faces.push_back({ static_cast<size_t>(f.ids[0]),
+                                    static_cast<size_t>(f.ids[1]),
+                                    static_cast<size_t>(f.ids[2]) });
+        }
+
+        // Register the mesh in Polyscope
+        auto* mesh = polyscope::registerSurfaceMesh("Ground Truth Mesh", ps_vertices, ps_faces);
+
+        // Optional appearance
+        mesh->setSurfaceColor({ 0.8, 0.6, 0.6 });
+        mesh->setEdgeWidth(0.001);
+        mesh->setEnabled(false);
+    }
+
+    // ======================================
+    
     
     recon_timer.end("algorithm");
     std::string line(40, '=');
@@ -619,6 +1240,45 @@ void Reconstructor::showProgressBar(float progress) {
     std::cout.flush();  // Flush the output to show the progress
 }
 
+void callback() {
+    static bool is_selecting = false;
+    ImGui::Checkbox("Selecting Points", &is_selecting);
+
+    if (is_selecting) {
+        ImGuiIO &io = ImGui::GetIO();
+        if (io.MouseClicked[0]) {
+            glm::vec2 screenCoords{io.MousePos.x, io.MousePos.y};
+            polyscope::PickResult pickResult = polyscope::pickAtScreenCoords(screenCoords);
+
+            if (pickResult.isHit && pickResult.structure == ps_cloud_for_polyscope) {
+                int idx = ps_cloud_for_polyscope->interpretPickResult(pickResult).index;
+                std::cout << "Clicked point index in v_smoothed: " << idx << std::endl;
+            }else if (pickResult.isHit && pickResult.structure == init_graph_for_polyscope) {
+                int idx = init_graph_for_polyscope->interpretPickResult(pickResult).index;
+                
+                std::vector<string> test_result_strings = {
+                    "Not tested",
+                    "Passed",
+                    "Failed: Topology",
+                    "Failed: Geometry"
+                };
+
+                std::cout
+                    << "Clicked edge index in init graph: "
+                    << idx << std::endl
+                    << "Result of test: " << test_result_strings[test_results[idx]+1] << std::endl;
+            }else if (pickResult.isHit && pickResult.structure == edges_passed){
+                int idx = edges_passed->interpretPickResult(pickResult).index;
+                int order = order_inserted[idx];
+                std::cout << "The edge has been inserted as the " << order << "-th edge in the first phase of reconstruction." << std::endl;
+            }
+        }
+    }
+}
+
+
+
+
 int main(int argc, char* argv[]){
 
     // Check if a parameter was provided
@@ -635,6 +1295,17 @@ int main(int argc, char* argv[]){
         return 1;
     }
 
+    // ======== Polyscope Initialization ========
+    polyscope::options::autocenterStructures = false;
+    polyscope::options::autoscaleStructures = false;
+	polyscope::view::windowWidth = 1024;
+	polyscope::view::windowHeight = 1024;
+
+	// Initialize polyscope
+	polyscope::init();
+
+    // ======== End of Polyscope Initialization ========
+
     //fs::path config_path(fs::path("../../configs/tree_config.txt"));
     fs::path config_path(path);
     Reconstructor recon(config_path);
@@ -648,5 +1319,8 @@ int main(int argc, char* argv[]){
         std::cout << "Mode Error!" << std::endl;
         return 1;
     }
+
+	polyscope::state::userCallback = callback;
+    polyscope::show();
     return 0;
 }

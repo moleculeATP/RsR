@@ -1,4 +1,7 @@
 #include "mst.h"
+int test_result_polyscope;
+Point middle_point_geometry_test;
+Vector normal_geometry_test;
 
 /**
  * @brief Build minimum spanning tree (MST)
@@ -82,7 +85,7 @@ void build_mst(m_Graph& mst, std::vector<Vertex>& p,
 		if (p[i] == i) {
 			if (p[i] == i)
 				std::cout << p[i] << std::endl;
-			std::cout << "vertex " + std::to_string(i) + " may be root vertex or seperated" << std::endl;
+			std::cout << "vertex " + std::to_string(i) + " may be root vertex or seperated" << std::endl; 
 			continue;
 		}
 		else {
@@ -198,7 +201,7 @@ bool isIntersecting(m_Graph& mst, Vertex v1, Vertex v2, Vertex v3, Vertex v4) {
  * @return if the candidate pass the check
  */
 bool geometry_check(m_Graph& mst, m_Edge& candidate, Tree& kdTree,
-	Distance& tr_dist) {
+	Distance& tr_dist, float max_edge_length) {
 	Vertex v1 = candidate.first;
 	Vertex v2 = candidate.second;
 	Point p1 = mst.graph[v1].coords;
@@ -206,14 +209,49 @@ bool geometry_check(m_Graph& mst, m_Edge& candidate, Tree& kdTree,
 	Vector n1 = mst.graph[v1].normal;
 	Vector n2 = mst.graph[v2].normal;
 
-	Vector mean_normal = (n1 + n2) / 2.;
+	// float tresh_normal = 60.;
+	float tresh_normal = 180.;
+
+	// // // Dot product alignment
+	// Vector n2_aligned = ((n1 * n2) < 0) ? -n2 : n2;
+    
+    // Vector mean_normal = n1 + n2_aligned;
+
+
+
+
+	// vanilla 
+	Vector mean_normal = n1 + n2;
+
+
+
+	// // --- TENSOR-BASED MEAN (Projective Space) --- GEMINI
+	// // This is just taking the bigger of n1+n2 and n1-n2
+    
+    // Vector v_sum = n1 + n2;
+    // Vector v_diff = n1 - n2;
+
+    // // The principal eigenvector of (n1*n1^T + n2*n2^T) 
+    // // is the one with the largest norm
+    // Vector mean_normal;
+    // if (v_sum.squared_length() >= v_diff.squared_length()) {
+    //     mean_normal = v_sum;
+    // } else {
+    //     mean_normal = v_diff;
+    // }
+
 	mean_normal = normalize_vector(mean_normal);
 
 	Point search_center = p1 + (p2 - p1) / 2.;
+	middle_point_geometry_test = search_center;
+	normal_geometry_test = mean_normal;
+
 	float radius = std::sqrt((p2-p1).squared_length())/2.;
 	std::vector<int> neighbors;
 	std::vector<float> distance;
-	NN_search(-1, search_center, kdTree, tr_dist, float(radius * 3.), neighbors, distance, false);
+	// float check_radius = radius + max_edge_length;
+	float check_radius = 1.5 * radius;
+	NN_search(-1, search_center, kdTree, tr_dist, check_radius, neighbors, distance, false);
 
 	//if ((v1 == 1068 && v2 == 133393) || v1 == 133393 && v2 == 1068)
 	//	std::cout << "debug here" << std::endl;
@@ -224,7 +262,7 @@ bool geometry_check(m_Graph& mst, m_Edge& candidate, Tree& kdTree,
 	for (int i = 0; i < neighbors.size(); i++) {
 		if (neighbors[i] == v1 || neighbors[i] == v2)
 			continue;
-		if (mst.graph[neighbors[i]].normal * mean_normal > std::cos(60. / 180. * CGAL_PI))
+		if (mst.graph[neighbors[i]].normal * mean_normal > std::cos(tresh_normal / 180. * CGAL_PI))
 			rejection_neighbor_set.insert(neighbors[i]);
 	}
 	for (int i = 0; i < neighbors.size(); i++) {
@@ -304,7 +342,7 @@ bool geometry_check(m_Graph& mst, m_Edge& candidate, Tree& kdTree,
  * @return if the candidate pass both checks
  */
 bool Vanilla_check(m_Graph& mst, m_Edge& candidate, Tree& kdTree, 
-	Distance& tr_dist) {
+	Distance& tr_dist, float max_edge_length) {
 	Vertex neighbor = candidate.second;
 	Vertex this_v = candidate.first;
 	Vector this_normal = normalize_vector(mst.graph[this_v].normal);
@@ -329,12 +367,18 @@ bool Vanilla_check(m_Graph& mst, m_Edge& candidate, Tree& kdTree,
 		auto neighbor_tree = predecessor(mst, neighbor, this_v).tree_id;
 
 		if (!mst.etf.connected(this_v_tree, neighbor_tree)) {
+			test_result_polyscope = 1;
 			return false;
 		}
 	}
-
-	return geometry_check(mst, candidate, kdTree, tr_dist);
-	//return true;
+	bool tmp = geometry_check(mst, candidate, kdTree, tr_dist, max_edge_length);
+	if (tmp) {
+		test_result_polyscope = 0;
+	}else{
+		test_result_polyscope = 2;
+	}
+	return tmp;
+	// return true;
 }
 
 /**
@@ -352,7 +396,7 @@ bool Vanilla_check(m_Graph& mst, m_Edge& candidate, Tree& kdTree,
  *
  * @return None
  */
-void connect_handle(const std::vector<Point>& smoothed_v, Tree& KDTree, Distance& tr_dist,
+void connect_handle(const std::vector<Point>& smoothed_v, Tree& KDTree, Distance& tr_dist, float max_edge_length,
 	m_Graph& mst, std::vector<Vertex>& connected_handle_root, std::vector<int>& betti, int k, bool isEuclidean, int step_thresh) {
 
 	std::vector<Vertex> imp_node;
@@ -400,7 +444,7 @@ void connect_handle(const std::vector<Point>& smoothed_v, Tree& KDTree, Distance
 				continue;
 			tree = mst.etf.representative((predecessor(mst, this_v, neighbor).tree_id));
 			to_tree = mst.etf.representative(predecessor(mst, neighbor, this_v).tree_id);
-			if (geometry_check(mst, candidate, KDTree, tr_dist) && tree != to_tree) {
+			if (geometry_check(mst, candidate, KDTree, tr_dist, max_edge_length) && tree != to_tree) {
 				validIdx = i;
 				break;
 			}
@@ -459,7 +503,7 @@ void connect_handle(const std::vector<Point>& smoothed_v, Tree& KDTree, Distance
 				//std::cout << "This is connected" << std::endl;
 				isFind = true;
 				m_Edge candidate(this_v, connected_neighbor);
-				if (geometry_check(mst, candidate, KDTree, tr_dist)) {
+				if (geometry_check(mst, candidate, KDTree, tr_dist, max_edge_length)) {
 					Vector edge = query - mst.graph[connected_neighbor].coords;
 					float Euclidean_dist = norm(edge);
 					float projection_dist = cal_proj_dist(edge, mst.graph[this_v].normal,

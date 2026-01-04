@@ -52,7 +52,7 @@ void estimate_normal(const std::vector<Point>& vertices,
 	diagonal_length = norm(max_p - min_p);
 
 	if (!isGTNormal) {
-		int neighbor_num = std::max<int>(int(vertices.size() / 2000.), 192);
+		int neighbor_num = std::max<int>(int(vertices.size() / 2000.), 20); // CHANGE HERE, it was 200
 		// Estimate normal
 		CGAL::pca_estimate_normals<Concurrency_tag>
 			(pointsWithProperties, neighbor_num,
